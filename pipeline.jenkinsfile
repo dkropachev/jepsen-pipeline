@@ -1,0 +1,98 @@
+#!groovy
+
+// trick from https://github.com/jenkinsci/workflow-cps-global-lib-plugin/pull/43
+def lib = library identifier: 'sct@snapshot', retriever: legacySCM(scm)
+
+pipeline {
+    agent {
+        node('gce-qavpc')
+    }
+//    agent {
+//        label {
+//               label getJenkinsLabels('gce').label
+//        }
+//    }
+    //    environment {
+    //    }
+    parameters {
+        string(defaultValue: '0.2.0',
+                description: 'Commit id or tag from jepsen_git igt',
+                name: 'jepsen_version')
+        string(defaultValue: 'git@github.com:jepsen-io/jepsen.git',
+                description: 'Jepsen git url',
+                name: 'jepsen_git')
+        string(defaultValue: 'main',
+                description: 'Jepsen git branch',
+                name: 'jepsen_branch')
+        string(defaultValue: 'HEAD',
+                description: 'Commit id or tag from scylla_jepsen_git git',
+                name: 'scylla_jepsen_version')
+        string(defaultValue: 'git@github.com:scylladb/jepsen.git',
+                description: 'Scylla jepsen test bench git url',
+                name: 'scylla_jepsen_git')
+        string(defaultValue: 'master',
+                description: 'Scylla jepsen test bench git branch',
+                name: 'scylla_jepsen_branch')
+        string(defaultValue: 'latest',
+                description: 'Tag from scylla docker hub repo (https://hub.docker.com/r/scylladb/scylla/tags)',
+                name: 'scylla_version')
+        string(defaultValue: "qa@scylladb.com",
+                description: 'Email recipients',
+                name: 'email_recipients')
+        string(defaultValue: "gce-qavpc",
+                description: 'node',
+                name: 'node')
+        string(defaultValue: "180",
+                description: 'timeout',
+                name: 'timeout')
+    }
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+//        timeout(params.timeout)
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                dir('jepsen-pipeline') {
+                    checkout scm
+                    sh "sudo rm -rf jepsen || true"
+                    dir('jepsen') {
+                        git(url: params.jepsen_git,
+                            credentialsId:'b8a774da-0e46-4c91-9f74-09caebaea261',
+                            branch: params.jepsen_branch)
+                        dir('scylla') {
+                            git(url: params.scylla_jepsen_git,
+                                 credentialsId:'b8a774da-0e46-4c91-9f74-09caebaea261',
+                                 branch: params.scylla_jepsen_branch)
+                        }
+                    }
+                }
+            }
+        }
+        stage('Build runner') {
+            steps {
+                dir('jepsen-pipeline') {
+                    dir('runner') {
+                        sh "docker build -t jepsen-runner ."
+                    }
+                }
+            }
+        }
+        stage('Run Jepsen') {
+            steps {
+                dir('jepsen-pipeline') {
+                    dir('jepsen') {
+                        dir('docker') {
+                            sh """docker run -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
+                                -v `pwd`:`pwd` -w `pwd` -v /var/run:/run jepsen-runner ./bin/up --dev
+                            """
+                            sh "docker exec -it jepsen-control bash -cxe 'cd ../scylla; lein test'"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
